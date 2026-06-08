@@ -1,0 +1,2 @@
+# slates
+Slack notes bot
