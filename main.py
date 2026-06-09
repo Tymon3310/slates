@@ -1,4 +1,5 @@
 import os
+import time
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -6,14 +7,12 @@ import sqlite3
 import re
 import logging
 
-# Configure the logging format engine
 logging.basicConfig(
-    level=logging.INFO, # Sets the threshold: ignores DEBUG, logs INFO and up
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-# Create a designated logger instance named after this module
 logger = logging.getLogger("slates_bot")
 
 load_dotenv()
@@ -42,9 +41,46 @@ def handle_ping_command(ack, respond, command):
     ack()
 
     user_id = command["user_id"]
-    logger.info("/slates-ping invoked by user=%s", user_id)
-    respond(f"Hello <@{user_id}>! Pong!")
+    raw_arg = command.get("text", "").strip()
 
+    count = 1
+    pings = []
+    if raw_arg.isdigit():
+        count = int(raw_arg)
+        if count < 1:
+            logger.info("/slates-ping invalid count=%d from user=%s", count, user_id)
+            respond("Please provide a real number of pings.")
+            return
+        elif count > 10:
+            logger.info("/slates-ping count=%d from user=%s capped to 10", count, user_id)
+            respond("Count too high, capping to 10 pings.")
+            count = 10
+        else:
+            logger.info("/slates-ping count=%d from user=%s", count, user_id)
+
+        respond(f"Pinging {count} times to measure latency...")
+
+        for i in range(count):
+            ping_time = time.perf_counter()
+            respond(f"Ping! Measuring latency...")
+            pong_time = time.perf_counter()
+            ping = (pong_time - ping_time) * 1000
+
+            logger.info("Ping %d for user=%s: %.2f ms", i + 1, user_id, ping)
+
+            pings.append(ping)
+            
+            if i < count:
+                time.sleep(0.5)
+
+    
+    if count > 1:
+        avrg_ping = sum(pings) / len(pings)
+        logger.info("Ping for user=%s: %.2f ms", user_id, avrg_ping)
+        respond(f"Pong! Average latency: {avrg_ping:.2f} ms")
+    else:
+        logger.info("Ping for user=%s: %.2f ms", user_id, ping)
+        respond(f"Pong! Latency: {ping:.2f} ms")
 
 @app.command("/slates")
 def handle_slates_command(ack, respond, command):
@@ -124,12 +160,35 @@ def handle_slates_command(ack, respond, command):
 
     elif subcommand == "list":
         logger.info("Listing slates for user=%s", user_id)
-        cursor.execute("SELECT id FROM slates WHERE owner_id = ?", (user_id,))
-        slates = cursor.fetchall()
-        if slates:
-            slate_ids = [str(s[0]) for s in slates]
-            logger.info("Found %d slates for user=%s", len(slate_ids), user_id)
-            respond(f"Your slates: {', '.join(slate_ids)}")
+        cursor.execute("SELECT id, content FROM slates WHERE owner_id = ? ORDER BY id", (user_id,))
+        owned_slates = cursor.fetchall()
+
+        cursor.execute("SELECT id, content, owner_id, shared_with FROM slates ORDER BY id")
+        shared_slates = []
+        for slate_id, content, owner_id, shared_with in cursor.fetchall():
+            if owner_id == user_id:
+                continue
+            shared_users = set(shared_with.split(",")) if shared_with else set()
+            if user_id in shared_users:
+                shared_slates.append((slate_id, content))
+
+        if owned_slates or shared_slates:
+            def truncate(text, limit=60):
+                return text if len(text) <= limit else text[:limit - 3] + "..."
+
+            lines = []
+            if owned_slates:
+                lines.append("Your slates:")
+                for slate_id, content in owned_slates:
+                    lines.append(f"- {slate_id}: {truncate(content)}")
+
+            if shared_slates:
+                lines.append("Shared with you:")
+                for slate_id, content in shared_slates:
+                    lines.append(f"- {slate_id}: {truncate(content)}")
+
+            logger.info("Found %d owned and %d shared slates for user=%s", len(owned_slates), len(shared_slates), user_id)
+            respond("\n".join(lines))
         else:
             logger.info("No slates found for user=%s", user_id)
             respond("You don't have any saved slates yet.")
