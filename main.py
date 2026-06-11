@@ -92,7 +92,7 @@ def handle_slates_command(ack, respond, command):
 
     if not raw_text:
         logger.info("/slates missing subcommand for user=%s", user_id)
-        respond("Try `/slates save <text>` or `/slates paste <id>`")
+        respond("Please provide a subcommand. Try `/slates-help` for available commands.")
         return
 
     parts = raw_text.split(" ", 1)
@@ -176,11 +176,18 @@ def handle_slates_command(ack, respond, command):
             def truncate(text, limit=60):
                 return text if len(text) <= limit else text[:limit - 3] + "..."
 
+            def format_shared_with(shared_with):
+                if not shared_with:
+                    return "private"
+                users = [user.strip() for user in shared_with.split(",") if user.strip()]
+                return "shared with " + ", ".join(f"<@{user}>" for user in users) if users else "not shared"
+
             lines = []
             if owned_slates:
                 lines.append("Your slates:")
-                for slate_id, content in owned_slates:
-                    lines.append(f"- {slate_id}: {truncate(content)}")
+                cursor.execute("SELECT id, content, shared_with FROM slates WHERE owner_id = ? ORDER BY id", (user_id,))
+                for slate_id, content, shared_with in cursor.fetchall():
+                    lines.append(f"- {slate_id}: {truncate(content)} ({format_shared_with(shared_with)})")
 
             if shared_slates:
                 lines.append("Shared with you:")
@@ -227,9 +234,47 @@ def handle_slates_command(ack, respond, command):
         logger.info("Shared slate id=%s from user=%s with user=%s", slate_id, user_id, target_user_id)
         respond(f"Shared slate {slate_id} with <@{target_user_id}>")
 
+    elif subcommand == "unshare":
+        logger.info("/slates unshare invoked by user=%s args=%r", user_id, args)
+        pattern = r"(?P<id>\d+)\s+<@(?P<user>[A-Z0-9]+)(?:\|[^>]+)?>|(?P<id_alt>\d+)\s+@(?P<user_alt>[\w.-]+)"
+        match = re.match(pattern, args)
+        if not match:
+            logger.info("/slates unshare rejected for user=%s invalid args=%r", user_id, args)
+            respond("Please provide a valid slate ID and user mention. Usage: `/slates unshare <id> @user`")
+            return
+        
+        slate_id = int(match.group("id") or match.group("id_alt"))
+        target_user_id = match.group("user") or match.group("user_alt")
+
+        cursor.execute("SELECT shared_with FROM slates WHERE id = ? AND owner_id = ?", (slate_id, user_id))
+        result = cursor.fetchone()
+
+        if not result:
+            logger.info("Unshare failed for user=%s slate id=%s", user_id, slate_id)
+            respond(f"No slate found with ID: {slate_id} that belongs to you.")
+            return
+        
+        shared_with = result[0]
+        if shared_with:
+            shared_users = set(shared_with.split(","))
+        else:
+            shared_users = set()
+
+        if target_user_id in shared_users:
+            shared_users.remove(target_user_id)
+            updated_shared_with = ",".join(shared_users)
+
+            cursor.execute("UPDATE slates SET shared_with = ? WHERE id = ?", (updated_shared_with, slate_id))
+            conn.commit()
+            logger.info("Unshared slate id=%s from user=%s with user=%s", slate_id, user_id, target_user_id)
+            respond(f"Unshared slate {slate_id} with <@{target_user_id}>")
+        else:
+            logger.info("User=%s was not shared on slate id=%s for user=%s", target_user_id, slate_id, user_id)
+            respond(f"Slate {slate_id} is not currently shared with <@{target_user_id}>")
+
     else:
         logger.info("Unknown /slates subcommand=%r user=%s", subcommand, user_id)
-        respond("Unknown subcommand. Try `/slates save <text>` or `/slates paste <id>`")
+        respond("Unknown subcommand. Try `/slates-help` for available commands.")
 
     conn.close()
 
@@ -244,6 +289,8 @@ def handle_slates_help_command(ack, respond):
         "`/slates delete <id>` - Delete a slate by its ID (only if you are the owner).\n"
         "`/slates list` - List all your saved slates with their IDs.\n"
         "`/slates share <id> @user` - Share a slate with another user by their ID and mention.\n"
+        "`/slates unshare <id> @user` - Unshare a slate with another user by their ID and mention.\n"
+        "`/slates-ping [count]` - Measure latency by pinging the bot a specified number of times (default 1, max 10).\n"
     )
     respond(help_text)
 
